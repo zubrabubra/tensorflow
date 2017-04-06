@@ -794,6 +794,9 @@ def main(_):
   do_distort_images = should_distort_images(
       FLAGS.flip_left_right, FLAGS.random_crop, FLAGS.random_scale,
       FLAGS.random_brightness)
+  #
+  # ===== Create Distributed Session ======
+  #
   sess = tf.Session()
 
   if do_distort_images:
