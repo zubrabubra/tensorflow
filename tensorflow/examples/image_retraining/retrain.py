@@ -910,6 +910,25 @@ def main(_):
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
+
+  # job distribution parameters
+  
+  parser.add_argument(
+      '--jobname',
+      type=str,
+      default='',
+      help='ps/wr, no default value'
+  )
+  
+  parser.add_argument(
+      '--taskindex',
+      type=int,
+      default=0,
+      help='index task id, default 0'
+  )
+  
+  # default example parameters
+
   parser.add_argument(
       '--image_dir',
       type=str,
