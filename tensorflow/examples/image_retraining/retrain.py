@@ -929,14 +929,17 @@ def execute(cluster):
     
     
 def main(_):
-  # Setup the directory we'll write summaries to for TensorBoard
-  if tf.gfile.Exists(FLAGS.summaries_dir):
-    tf.gfile.DeleteRecursively(FLAGS.summaries_dir)
-  tf.gfile.MakeDirs(FLAGS.summaries_dir)
+  if (FLAGS.downloadonly == 'download'):
+      # Setup the directory we'll write summaries to for TensorBoard
+      if tf.gfile.Exists(FLAGS.summaries_dir):
+        tf.gfile.DeleteRecursively(FLAGS.summaries_dir)
+      tf.gfile.MakeDirs(FLAGS.summaries_dir)
 
-  # Set up the pre-trained graph.
-  print("Download pre-trained model.")
-  maybe_download_and_extract()
+      # Set up the pre-trained graph.
+      print("Download pre-trained model.")
+      maybe_download_and_extract()
+      print("Should be ready for learning, training.")
+      return
 
   print("Init the cluster.")
   (cluster, server) = cluster_init()
@@ -950,6 +953,14 @@ def main(_):
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
+  
+  # data download only
+  parser.add_argument(
+      '--downloadonly',
+      type=str,
+      default='',
+      help='download only usage'
+  )
 
   # job distribution parameters
   
