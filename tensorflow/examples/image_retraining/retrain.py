@@ -767,14 +767,21 @@ def add_evaluation_step(result_tensor, ground_truth_tensor):
   return evaluation_step, prediction
 
 
-def main(_):
-  # Setup the directory we'll write summaries to for TensorBoard
-  if tf.gfile.Exists(FLAGS.summaries_dir):
-    tf.gfile.DeleteRecursively(FLAGS.summaries_dir)
-  tf.gfile.MakeDirs(FLAGS.summaries_dir)
+def cluster_init():
+    cluster_def = None
+    CLUSTER_CONFIG = os.environ.get('CLUSTER_CONFIG')
+    if CLUSTER_CONFIG:
+        cluster_def = ast.literal_eval(CLUSTER_CONFIG)
+    else:
+        parameter_servers = ["localhost:2222"]
+        workers = ["localhost:2223", "localhost:2224"]
+        cluster_def = {"ps": parameter_servers, "worker": workers}
+    cluster = tf.train.ClusterSpec(cluster_def)
+    server = tf.train.Server(cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index)
+    return (cluster, server)
 
-  # Set up the pre-trained graph.
-  maybe_download_and_extract()
+
+def execute(cluster):
   graph, bottleneck_tensor, jpeg_data_tensor, resized_image_tensor = (
       create_inception_graph())
 
@@ -906,6 +913,27 @@ def main(_):
     f.write(output_graph_def.SerializeToString())
   with gfile.FastGFile(FLAGS.output_labels, 'w') as f:
     f.write('\n'.join(image_lists.keys()) + '\n')
+
+    
+    
+def main(_):
+  # Setup the directory we'll write summaries to for TensorBoard
+  if tf.gfile.Exists(FLAGS.summaries_dir):
+    tf.gfile.DeleteRecursively(FLAGS.summaries_dir)
+  tf.gfile.MakeDirs(FLAGS.summaries_dir)
+
+  # Set up the pre-trained graph.
+  print("Download pre-trained model.")
+  maybe_download_and_extract()
+
+  print("Init the cluster.")
+  (cluster, server) = cluster_init()
+  
+  if (FLAGS.jobname == 'ps'):
+    server.join()
+    return
+  elif (FLAGS.jobname == 'wr'):
+    execute(cluster)
 
 
 if __name__ == '__main__':
