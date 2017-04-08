@@ -736,13 +736,28 @@ def add_final_training_ops(class_count, final_tensor_name, bottleneck_tensor):
     with tf.name_scope('total'):
       cross_entropy_mean = tf.reduce_mean(cross_entropy)
   tf.summary.scalar('cross_entropy', cross_entropy_mean)
+  # Check if we should use managed session
+  #Global step counter for supvervisor to checkpoint
+  global_step = tf.Variable(0, name='global_step', trainable=False)
 
   with tf.name_scope('train'):
-    train_step = tf.train.GradientDescentOptimizer(FLAGS.learning_rate).minimize(
-        cross_entropy_mean)
+      #grad_op = tf.train.GradientDescentOptimizer(FLAGS.learning_rate)
+
+    #   rep_op = tf.train.SyncReplicasOptimizer(grad_op,
+    #                                       replicas_to_aggregate=2,
+    #                                       #replica_id=FLAGS.task_index,
+    #                                       total_num_replicas=2
+    #                                       )
+    #   train_step = rep_op.minimize(cross_entropy, global_step=global_step)
+
+      #train_op = grad_op.minimize(cross_entropy, global_step=global_step)
+
+
+      train_step = tf.train.GradientDescentOptimizer(FLAGS.learning_rate).minimize(
+      cross_entropy_mean, global_step = global_step)
 
   return (train_step, cross_entropy_mean, bottleneck_input, ground_truth_input,
-          final_tensor)
+          final_tensor, global_step)
 
 
 def add_evaluation_step(result_tensor, ground_truth_tensor):
@@ -763,7 +778,7 @@ def add_evaluation_step(result_tensor, ground_truth_tensor):
           prediction, tf.argmax(ground_truth_tensor, 1))
     with tf.name_scope('accuracy'):
       evaluation_step = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
-  tf.summary.scalar('accuracy', evaluation_step)
+  tf.summary.scalar('accuracy%d' % FLAGS.task_index, evaluation_step)
   return evaluation_step, prediction
 
 
@@ -781,7 +796,7 @@ def cluster_init():
     return (cluster, server)
 
 
-def execute(cluster):
+def execute(cluster, server):
   with tf.device(tf.train.replica_device_setter(cluster=cluster)):
       graph, bottleneck_tensor, jpeg_data_tensor, resized_image_tensor = (
           create_inception_graph())
@@ -802,14 +817,14 @@ def execute(cluster):
       do_distort_images = should_distort_images(
           FLAGS.flip_left_right, FLAGS.random_crop, FLAGS.random_scale,
           FLAGS.random_brightness)
+      #global counter
+      #global_step = tf.Variable(0, name='global_step', trainable=False)
       #
       # ===== Create Distributed Session ======
       #
-      sv = tf.train.Supervisor(is_chief=(FLAGS.task_index == 0), global_step=global_step, init_op=init)
-
-      # Check if we should use managed session
-      with sv.prepare_or_wait_for_session(server.target) as sess:
-
+      #sv = tf.train.Supervisor(is_chief=(FLAGS.task_index == 0), global_step=global_step, init_op=init)
+      with tf.Session() as sess:
+          #with sv.prepare_or_wait_for_session(server.target) as sess:
           if do_distort_images:
             # We will be applying distortions, so setup the operations we'll need.
             distorted_jpeg_data_tensor, distorted_image_tensor = add_input_distortions(
@@ -821,28 +836,42 @@ def execute(cluster):
             cache_bottlenecks(sess, image_lists, FLAGS.image_dir, FLAGS.bottleneck_dir,
                               jpeg_data_tensor, bottleneck_tensor)
 
-          # Add the new layer that we'll be training.
-          (train_step, cross_entropy, bottleneck_input, ground_truth_input,
-           final_tensor) = add_final_training_ops(len(image_lists.keys()),
-                                                  FLAGS.final_tensor_name,
-                                                  bottleneck_tensor)
 
-          # Create the operations we need to evaluate the accuracy of our new layer.
-          evaluation_step, prediction = add_evaluation_step(
-              final_tensor, ground_truth_input)
+      # Add the new layer that we'll be training.
+      (train_step, cross_entropy, bottleneck_input, ground_truth_input,
+       final_tensor, global_step) = add_final_training_ops(len(image_lists.keys()),
+                                              FLAGS.final_tensor_name,
+                                              bottleneck_tensor)
 
-          # Merge all the summaries and write them out to /tmp/retrain_logs (by default)
-          merged = tf.summary.merge_all()
-          train_writer = tf.summary.FileWriter(FLAGS.summaries_dir + '/train',
-                                               sess.graph)
-          validation_writer = tf.summary.FileWriter(FLAGS.summaries_dir + '/validation')
+      # Create the operations we need to evaluate the accuracy of our new layer.
+      evaluation_step, prediction = add_evaluation_step(
+          final_tensor, ground_truth_input)
 
-          # Set up all our weights to their initial default values.
-          init = tf.global_variables_initializer()
-          sess.run(init)
+      # Merge all the summaries and write them out to /tmp/retrain_logs (by default)
+      merged = tf.summary.merge_all()
+      train_writer = tf.summary.FileWriter(FLAGS.summaries_dir + '/train',
+                                           sess.graph)
+      validation_writer = tf.summary.FileWriter(FLAGS.summaries_dir + '/validation')
 
+      # Set up all our weights to their initial default values.
+      init = tf.global_variables_initializer()
+#      sess.run(init)
+
+      print("Start hooking")
+      hooks=[tf.train.StopAtStepHook(last_step=FLAGS.how_many_training_steps)]
+
+      print("Starting supervisor")
+      #sv = tf.train.Supervisor(is_chief=(FLAGS.task_index == 0), global_step=global_step, init_op=init)
+      print("Started supervisor")
+      with tf.train.MonitoredTrainingSession(master=server.target,
+                                       is_chief=(FLAGS.task_index == 0),
+                                       checkpoint_dir="/tmp/train_logs",
+                                       hooks=hooks) as sess:
+#      with sv.prepare_or_wait_for_session(server.target) as sess:
+          print("Started")
+          while not sess.should_stop():
           # Run the training for as many cycles as requested on the command line.
-          for i in range(FLAGS.how_many_training_steps):
+          #for i in range(FLAGS.how_many_training_steps):
             # Get a batch of input bottleneck values, either calculated fresh every time
             # with distortions applied, or from the cache stored on disk.
             if do_distort_images:
@@ -857,38 +886,42 @@ def execute(cluster):
                   bottleneck_tensor)
             # Feed the bottlenecks and ground truth into the graph, and run a training
             # step. Capture training summaries for TensorBoard with the `merged` op.
-            train_summary, _ = sess.run([merged, train_step],
+            train_summary, step, _ = sess.run([merged, global_step, train_step],
                      feed_dict={bottleneck_input: train_bottlenecks,
                                 ground_truth_input: train_ground_truth})
-            train_writer.add_summary(train_summary, i)
+            train_writer.add_summary(train_summary, step)
 
             # Every so often, print out how well the graph is training.
-            is_last_step = (i + 1 == FLAGS.how_many_training_steps)
-            if (i % FLAGS.eval_step_interval) == 0 or is_last_step:
-              train_accuracy, cross_entropy_value = sess.run(
-                  [evaluation_step, cross_entropy],
-                  feed_dict={bottleneck_input: train_bottlenecks,
-                             ground_truth_input: train_ground_truth})
-              print('%s: Step %d: Train accuracy = %.1f%%' % (datetime.now(), i,
-                                                              train_accuracy * 100))
-              print('%s: Step %d: Cross entropy = %f' % (datetime.now(), i,
-                                                         cross_entropy_value))
-              validation_bottlenecks, validation_ground_truth, _ = (
-                  get_random_cached_bottlenecks(
-                      sess, image_lists, FLAGS.validation_batch_size, 'validation',
-                      FLAGS.bottleneck_dir, FLAGS.image_dir, jpeg_data_tensor,
-                      bottleneck_tensor))
-              # Run a validation step and capture training summaries for TensorBoard
-              # with the `merged` op.
-              validation_summary, validation_accuracy = sess.run(
-                  [merged, evaluation_step],
-                  feed_dict={bottleneck_input: validation_bottlenecks,
-                             ground_truth_input: validation_ground_truth})
-              validation_writer.add_summary(validation_summary, i)
-              print('%s: Step %d: Validation accuracy = %.1f%% (N=%d)' %
-                    (datetime.now(), i, validation_accuracy * 100,
-                     len(validation_bottlenecks)))
+            #is_last_step = (i + 1 == FLAGS.how_many_training_steps)
+            if (step % FLAGS.eval_step_interval) == 0:
+              if not sess.should_stop():
+                  train_accuracy, cross_entropy_value = sess.run(
+                      [evaluation_step, cross_entropy],
+                      feed_dict={bottleneck_input: train_bottlenecks,
+                                 ground_truth_input: train_ground_truth})
+                  print('%s: Step %d: Train accuracy = %.1f%%' % (datetime.now(), step,
+                                                                  train_accuracy * 100))
+                  print('%s: Step %d: Cross entropy = %f' % (datetime.now(), step,
+                                                             cross_entropy_value))
+              if not sess.should_stop():
+                  validation_bottlenecks, validation_ground_truth, _ = (
+                      get_random_cached_bottlenecks(
+                          sess, image_lists, FLAGS.validation_batch_size, 'validation',
+                          FLAGS.bottleneck_dir, FLAGS.image_dir, jpeg_data_tensor,
+                          bottleneck_tensor))
+                  # Run a validation step and capture training summaries for TensorBoard
+                  # with the `merged` op.
+                  validation_summary, validation_accuracy = sess.run(
+                      [merged, evaluation_step],
+                      feed_dict={bottleneck_input: validation_bottlenecks,
+                                 ground_truth_input: validation_ground_truth})
+                  validation_writer.add_summary(validation_summary, step)
+                  print('%s: Step %d: Validation accuracy = %.1f%% (N=%d)' %
+                        (datetime.now(), step, validation_accuracy * 100,
+                         len(validation_bottlenecks)))
 
+
+    #with tf.Session() as sess:
           # We've completed all our training, so run a final test evaluation on
           # some new images we haven't used before.
           test_bottlenecks, test_ground_truth, test_filenames = (
@@ -922,12 +955,12 @@ def execute(cluster):
               print("Model has been saved.")
           else:
             print("I'm not a chief here, leaving.")
-            
-      # Double check if we need it
-      sv.stop()
 
-    
-    
+      # Double check if we need it
+      #sv.stop()
+
+
+
 def main(_):
   if (FLAGS.downloadonly == 'download'):
       # Setup the directory we'll write summaries to for TensorBoard
@@ -943,17 +976,17 @@ def main(_):
 
   print("Init the cluster.")
   (cluster, server) = cluster_init()
-  
-  if (FLAGS.jobname == 'ps'):
+
+  if (FLAGS.job_name == 'ps'):
     server.join()
     return
-  elif (FLAGS.jobname == 'wr'):
-    execute(cluster)
+  elif (FLAGS.job_name == 'worker'):
+    execute(cluster, server)
 
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
-  
+
   # data download only
   parser.add_argument(
       '--downloadonly',
@@ -963,21 +996,21 @@ if __name__ == '__main__':
   )
 
   # job distribution parameters
-  
+
   parser.add_argument(
-      '--jobname',
+      '--job_name',
       type=str,
       default='',
       help='ps/wr, no default value'
   )
-  
+
   parser.add_argument(
-      '--taskindex',
+      '--task_index',
       type=int,
       default=0,
       help='index task id, default 0'
   )
-  
+
   # default example parameters
 
   parser.add_argument(
@@ -1031,7 +1064,7 @@ if __name__ == '__main__':
   parser.add_argument(
       '--eval_step_interval',
       type=int,
-      default=10,
+      default=100,
       help='How often to evaluate the training results.'
   )
   parser.add_argument(
